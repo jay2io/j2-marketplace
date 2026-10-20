@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: bot-marketplace
+    env: python
+    plan: starter
+    buildCommand: "echo no build needed"
+    startCommand: "bash start.sh"
+    envVars:
+      - key: DISABLE_AUTH
+        value: "1"
+      - key: PYTHON_VERSION
+        value: "3.12.4"
