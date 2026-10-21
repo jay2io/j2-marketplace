@@ -224,9 +224,12 @@ def build(invasion, seed):
 
     # genuine users
     genuine_uids = []
+    join_offset = {}
     for _ in range(cfg["n_genuine_users"]):
+        jo = -rng.uniform(10, 540)
+        join_offset[uid] = jo
         users.append((uid, gen_username(rng, used_names),
-                      iso(anchor, days=-rng.uniform(10, 540)),
+                      iso(anchor, days=jo),
                       rng.choice(G_BIOS)))
         genuine_uids.append(uid)
         uid += 1
@@ -237,11 +240,13 @@ def build(invasion, seed):
         for _ in range(rng.randint(lo, hi)):
             r = rng.random()
             rating = 5 if r < 0.50 else 4 if r < 0.80 else 3 if r < 0.92 else 2 if r < 0.97 else 1
-            reviews.append((rid, pid, rng.choice(genuine_uids), rating,
+            author = rng.choice(genuine_uids)
+            reviews.append((rid, pid, author, rating,
                             rng.choice(G_TITLES),
                             rng.choice(G_BODIES).format(p=pname.split()[0] + " " + pname.split()[1]
                                                         if len(pname.split()) > 1 else pname),
-                            iso(anchor, days=-rng.uniform(2, 500), minutes=rng.uniform(0, 1440))))
+                            iso(anchor, days=rng.uniform(join_offset[author], 0),
+                                minutes=rng.uniform(0, 1440))))
             rid += 1
 
     # bot clusters
@@ -273,6 +278,23 @@ def build(invasion, seed):
         cluster_info.append({"key": c["key"], "n_accounts": c["n"],
                              "target_product": c["target"], "rating": c["rating"],
                              "n_reviews": len(c_rids)})
+
+    # Shuffle the user list so bot accounts are interleaved among genuine
+    # ones — no contiguous ID block for a plan (or the dot) to lean on —
+    # then remap every ID consistently. Added 2026-10-21 for the held-out
+    # run. NOTE: the train run was generated with the pre-fix seeder; its
+    # labels/scorecards are archived and must not be regenerated.
+    temp_ids = [u[0] for u in users]
+    shuffled = temp_ids[:]
+    rng.shuffle(shuffled)
+    final_id = {t: i + 1 for i, t in enumerate(shuffled)}
+    users = sorted(
+        [(final_id[u[0]], u[1], u[2], u[3]) for u in users],
+        key=lambda u: u[0],
+    )
+    reviews = [(r[0], r[1], final_id[r[2]], r[3], r[4], r[5], r[6])
+               for r in reviews]
+    bot_user_ids = [final_id[t] for t in bot_user_ids]
 
     return users, reviews, bot_user_ids, bot_review_ids, cluster_info, anchor
 
