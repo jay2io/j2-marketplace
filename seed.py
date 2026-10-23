@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
-"""Deterministic seeder for the Bot Invasion demo marketplace.
+"""Deterministic seeder for the v2 'claws' marketplace (REDESIGN_PLAN.md).
 
-Generates a SQLite marketplace DB (products, users, reviews) with a staged
-bot swarm mixed among genuine-looking accounts. Bot labels are written to a
-SEPARATE JSON file that is never served by the web app.
+Design A: the full data lives only in downloadable exports, so the generator
+builds genuine accounts with DEEP activity (per-user review histories) and
+hides the 100 bots in behavior, not names:
+  - bot usernames/bios come from the SAME pools as genuine users (no tells);
+  - the bot signature is joint: joined within days of each other + review
+    ONLY one shared product + identical review text shared across the group
+    + all reviews posted on a single day.
+
+Planted traps (all genuine, recorded in labels):
+  T1 fan burst    - older genuine accounts post 5-star reviews of one
+                    product inside a 3-day window (a launch). Catches
+                    product-burst-only detectors.
+  T2 talkers      - genuine users who repeat their own 2 stock phrases
+                    across many products. Catches self-repetition detectors.
+  T3 lookalikes   - genuine users who joined in the same ~3-week span and
+                    share one product. Catches join+product partial matches.
 
 Usage:
-    python3 seed.py --invasion train --seed 42 \
-        --db /root/market/db-train.sqlite3 \
-        --labels /root/labels/labels-train.json
-
-Determinism: same (invasion, seed) -> byte-identical review/user content
-(modulo labels generated_at timestamp, which is informational only).
+    python3 seed_v2.py --variant old --seed 20261025 \
+        --db /tmp/market-v2.sqlite3 --labels /tmp/labels-v2-old.json
 """
 import argparse
 import datetime as dt
@@ -19,9 +28,7 @@ import json
 import os
 import random
 import sqlite3
-import sys
 
-# ---------------------------------------------------------------- products
 PRODUCTS = [
     (1, "Aurora Wireless Headphones", "Over-ear noise-cancelling headphones, 40h battery.", 12999, "Audio"),
     (2, "BrewMaster Pour-Over Coffee Maker", "Glass pour-over dripper with walnut collar.", 8999, "Kitchen"),
@@ -38,7 +45,6 @@ PRODUCTS = [
 ]
 PNAME = {pid: name for pid, name, _, _, _ in PRODUCTS}
 
-# ------------------------------------------------------- genuine templates
 G_TITLES = [
     "Great purchase", "Does the job", "Pleasantly surprised", "Solid", "Worth it",
     "Good, minor quibbles", "Exceeded expectations", "Fine for the price",
@@ -93,99 +99,48 @@ G_BIOS = [
     "I buy it, I try it, I review it.", "Deal hunter.", "Minimalist in training.",
     "Tech support for my whole family.", "Night owl.", "DIY everything.",
 ]
-G_FIRST = ["maria","james","priya","sam","lena","chen","fatima","gus","nina","omar",
-           "tess","will","ana","kia","rex","mia","leo","ivy","noah","ella","liam",
-           "sofia","mateo","yuki","raj","zoe","eli","ruby","finn","clara"]
-G_SECOND = ["_k","42","_lee","88","_nyc","_tx","_m","_r","007","_24","_jo","_pa",
-            "99","_sf","_chi","_bk","_23","_am","_dc","_sea"]
+G_FIRST = ["maria", "james", "priya", "sam", "lena", "chen", "fatima", "gus", "nina", "omar",
+           "tess", "will", "ana", "kia", "rex", "mia", "leo", "ivy", "noah", "ella", "liam",
+           "sofia", "mateo", "yuki", "raj", "zoe", "eli", "ruby", "finn", "clara"]
+G_SECOND = ["_k", "42", "_lee", "88", "_nyc", "_tx", "_m", "_r", "007", "_24", "_jo", "_pa",
+            "99", "_sf", "_chi", "_bk", "_23", "_am", "_dc", "_sea"]
 
-# ---------------------------------------------------------------- invasions
-INVASIONS = {
-    "train": {
-        "seed": 42,
-        "anchor": "2026-10-01T00:00:00Z",
-        "n_genuine_users": 250,
-        "genuine_reviews_per_product": (30, 50),
-        "bot_clusters": [
-            {"key": "A", "n": 40, "user_pat": "bestdeals_{n:04d}",
-             "bio": "Best deals daily! Follow for more.",
-             "target": 3, "rating": 5, "reviews_each": (3, 4),
-             "burst_day_offset": 9, "burst_hours": 6,
-             "join_spread_days": 2,
-             "bodies": [
-                 "Amazing product! Five stars, highly recommend to everyone!",
-                 "Best purchase ever! Works perfectly, five stars!",
-                 "Excellent quality! I love it! Five stars recommend!",
-                 "Perfect! Exactly what I wanted! Five stars!",
-                 "Great product, great price! Five stars, buy it now!",
-                 "Wonderful! Could not be happier! Five stars!",
-             ],
-             "titles": ["Amazing!", "Perfect!", "Love it!", "Five stars!", "Best ever!"]},
-            {"key": "B", "n": 35, "user_pat": "topreviewer{n:03d}",
-             "bio": "Top reviewer. Honest opinions daily.",
-             "target": 7, "rating": 5, "reviews_each": (2, 4),
-             "burst_day_offset": 14, "burst_hours": 4,
-             "join_spread_days": 2,
-             "bodies": [
-                 "These shoes changed my runs. Incredible comfort, five stars.",
-                 "Unbelievable comfort for running. Five stars, must buy.",
-                 "My runs feel amazing now. Perfect shoes, five stars.",
-                 "Incredible running shoes. Comfort is unreal. Five stars.",
-                 "Best running shoes I have owned. Five stars, highly recommend.",
-                 "Perfect fit and amazing comfort. Five stars for these shoes.",
-             ],
-             "titles": ["Incredible!", "Must buy!", "Perfect fit!", "Amazing comfort!"]},
-            {"key": "C", "n": 25, "user_pat": "honestbuyer_{n:04d}",
-             "bio": "Just sharing my honest experience.",
-             "target": 5, "rating": 1, "reviews_each": (2, 3),
-             "burst_day_offset": 20, "burst_hours": 8,
-             "join_spread_days": 3,
-             "bodies": [
-                 "Stopped working after two days. Terrible. One star, do not buy.",
-                 "Complete waste of money. Broke immediately. One star.",
-                 "Does not work as described. Very disappointed. One star.",
-                 "Terrible quality, stopped working fast. One star, avoid.",
-                 "Worst charger I have owned. Failed in days. One star.",
-             ],
-             "titles": ["Terrible", "Do not buy", "Broke fast", "Waste of money"]},
-        ],
-    },
-    "heldout": {
-        "seed": 1337,
-        "anchor": "2026-10-01T00:00:00Z",
-        "n_genuine_users": 250,
-        "genuine_reviews_per_product": (28, 48),
-        "bot_clusters": [
-            {"key": "X", "n": 50, "user_pat": "dealhunter{n:03d}",
-             "bio": "Hunting the best deals for you!",
-             "target": 2, "rating": 5, "reviews_each": (3, 5),
-             "burst_day_offset": 6, "burst_hours": 3,
-             "join_spread_days": 1,
-             "bodies": [
-                 "Fantastic coffee maker! Brews perfect cups! Five stars!",
-                 "Perfect brew every time! Amazing machine! Five stars!",
-                 "Best coffee maker hands down! Five stars, love it!",
-                 "Incredible coffee! This maker is perfect! Five stars!",
-                 "Makes the best coffee! Wonderful product! Five stars!",
-                 "Superb! My mornings are better now! Five stars!",
-             ],
-             "titles": ["Fantastic!", "Perfect brew!", "Love it!", "Superb!"]},
-            {"key": "Y", "n": 50, "user_pat": "verifiedshopper_{n:04d}",
-             "bio": "Verified shopper sharing real experiences.",
-             "target": 9, "rating": 5, "reviews_each": (2, 4),
-             "burst_day_offset": 17, "burst_hours": 10,
-             "join_spread_days": 4,
-             "bodies": [
-                 "Sleep quality improved so much. Cozy and warm. Five stars.",
-                 "So cozy! Best sleep in years. Five stars, recommend!",
-                 "Wonderfully cozy blanket. Sleep better now. Five stars.",
-                 "Amazing warmth and comfort. Five stars for this blanket.",
-                 "Perfect weight, super cozy. Five stars, love it!",
-             ],
-             "titles": ["So cozy!", "Best sleep!", "Wonderful!", "Perfect!"]},
-        ],
-    },
-}
+UPDATE_BODIES = [
+    "Updating my earlier review of the {p}: still holding up after another month of use.",
+    "Second look at the {p} after more time with it. My opinion is unchanged, in a good way.",
+    "Follow-up on the {p}: customer service sorted my issue, raising my score.",
+    "Revisiting the {p} a few weeks later. It has grown on me.",
+]
+FAN_BODIES = [
+    "Waited months for this restock and it was worth it. The {p} sold out in a day last time.",
+    "Pre-ordered the {p} the moment the launch email landed. First impressions: excellent.",
+    "Our whole group chat ordered the {p} on launch day. Zero regrets so far.",
+    "Launch-day purchase of the {p}. The new version fixes everything I disliked before.",
+    "Camped the product page for the {p} drop. Arrived yesterday, loving it already.",
+    "The {p} finally launched and it lives up to the teasers. Very happy.",
+    "Early backer of the {p} from the announcement. The finished product is great.",
+    "Grabbed the {p} during the launch window before it sells out again. Superb.",
+]
+TALKER_PHRASES = [
+    ("Great product. Fast shipping. Five stars.", "Five stars!"),
+    ("Works perfectly. Exactly as described. Recommend.", "Works perfectly!"),
+    ("Best purchase I have made this year. Amazing quality.", "Amazing!"),
+    ("Love it love it love it. Will buy again for sure.", "Love it!"),
+]
+BOT_BODY_SETS = [
+    ["Fantastic! Exceeded all my expectations! Five stars, highly recommend!",
+     "Perfect in every way! Best purchase ever! Five stars!",
+     "Amazing quality! I am so happy with this! Five stars recommend!",
+     "Wonderful product! Works flawlessly! Five stars!",
+     "Superb! Could not ask for more! Five stars, buy it now!",
+     "Excellent! Five stars well deserved! Highly recommend!"],
+    ["Brilliant design and flawless performance. Five stars.",
+     "This is the one to buy. Nothing else compares. Five stars.",
+     "Outstanding in every category. Five stars, easily.",
+     "Premium quality at a great price. Five stars recommend.",
+     "Instant favorite. Five stars and I would buy again today."],
+]
+BOT_TITLES = ["Fantastic!", "Perfect!", "Five stars!", "Amazing!", "Outstanding!", "Best ever!", "Superb!"]
 
 SCHEMA = """
 CREATE TABLE products(id INTEGER PRIMARY KEY, name TEXT, description TEXT,
@@ -197,6 +152,11 @@ CREATE INDEX idx_rev_product ON reviews(product_id);
 CREATE INDEX idx_rev_user ON reviews(user_id);
 CREATE INDEX idx_users_joined ON users(join_date);
 """
+
+ANCHOR = "2026-10-15T00:00:00Z"
+N_GENUINE = 244  # + 6 lookalikes = 250 genuine; + 100 bots = 350 total
+N_REVIEWS_CHOICES = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15]
+N_REVIEWS_W = [3, 6, 12, 14, 14, 12, 10, 9, 8, 7, 5]
 
 
 def iso(base, days=0.0, minutes=0.0):
@@ -213,122 +173,181 @@ def gen_username(rng, used):
             return u
 
 
-def build(invasion, seed):
-    cfg = INVASIONS[invasion]
+def rating_roll(rng):
+    r = rng.random()
+    return 5 if r < 0.50 else 4 if r < 0.80 else 3 if r < 0.92 else 2 if r < 0.97 else 1
+
+
+def short_name(pid):
+    parts = PNAME[pid].split()
+    return " ".join(parts[:2]) if len(parts) > 1 else PNAME[pid]
+
+
+def build(seed):
     rng = random.Random(seed)
-    anchor = dt.datetime.strptime(cfg["anchor"], "%Y-%m-%dT%H:%M:%SZ")
+    anchor = dt.datetime.strptime(ANCHOR, "%Y-%m-%dT%H:%M:%SZ")
     used_names = set()
     users, reviews = [], []
-    bot_user_ids, bot_review_ids = [], []
     uid, rid = 1, 1
+    traps = {"fan_burst": [], "talkers": [], "lookalikes": []}
 
-    # genuine users
-    genuine_uids = []
-    join_offset = {}
-    for _ in range(cfg["n_genuine_users"]):
+    # ---- assign special products (distinct): 2 bot targets, fan, lookalike
+    spots = rng.sample([p[0] for p in PRODUCTS], 4)
+    bot_targets, fan_pid, look_pid = spots[:2], spots[2], spots[3]
+
+    # ---- genuine users
+    genuine = []  # (temp_uid, join_days_offset)
+    for _ in range(N_GENUINE):
         jo = -rng.uniform(10, 540)
-        join_offset[uid] = jo
-        users.append((uid, gen_username(rng, used_names),
-                      iso(anchor, days=jo),
-                      rng.choice(G_BIOS)))
-        genuine_uids.append(uid)
+        users.append([uid, gen_username(rng, used_names), iso(anchor, days=jo),
+                      rng.choice(G_BIOS)])
+        genuine.append((uid, jo))
         uid += 1
 
-    # genuine reviews
-    lo, hi = cfg["genuine_reviews_per_product"]
-    for pid, pname, _, _, _ in PRODUCTS:
-        for _ in range(rng.randint(lo, hi)):
-            r = rng.random()
-            rating = 5 if r < 0.50 else 4 if r < 0.80 else 3 if r < 0.92 else 2 if r < 0.97 else 1
-            author = rng.choice(genuine_uids)
-            reviews.append((rid, pid, author, rating,
-                            rng.choice(G_TITLES),
-                            rng.choice(G_BODIES).format(p=pname.split()[0] + " " + pname.split()[1]
-                                                        if len(pname.split()) > 1 else pname),
-                            iso(anchor, days=rng.uniform(join_offset[author], 0),
-                                minutes=rng.uniform(0, 1440))))
-            rid += 1
+    # traps: choose members from genuine pool
+    old_enough = [g for g in genuine if g[1] < -60]
+    fan_members = [g[0] for g in rng.sample(old_enough, 14)]
+    traps["fan_burst"] = fan_members
+    rest = [g for g in genuine if g[0] not in fan_members]
+    talker_members = [g[0] for g in rng.sample(rest, 10)]
+    traps["talkers"] = talker_members
+    talker_phrase = {t: rng.choice(TALKER_PHRASES) for t in talker_members}
+    look_members = []
+    traps["lookalikes"] = look_members  # filled below (need custom joins)
 
-    # bot clusters
-    cluster_info = []
-    for c in cfg["bot_clusters"]:
-        c_uids, c_rids = [], []
-        join_base = -c["burst_day_offset"] - rng.uniform(0, c["join_spread_days"])
-        for i in range(c["n"]):
-            uname = c["user_pat"].format(n=rng.randint(1, 9999))
-            while uname in used_names:
-                uname = c["user_pat"].format(n=rng.randint(1, 9999))
-            used_names.add(uname)
-            users.append((uid, uname,
+    join_of = {g[0]: g[1] for g in genuine}
+
+    def add_review(author, pid, rating, title, body, day_off, minute=None):
+        nonlocal rid
+        reviews.append([rid, pid, author, rating, title, body,
+                        iso(anchor, days=day_off,
+                            minutes=rng.uniform(0, 1440) if minute is None else minute)])
+        rid += 1
+
+    # ---- genuine reviews (per-user histories)
+    all_pids = [p[0] for p in PRODUCTS]
+    for gu, jo in genuine:
+        n = rng.choices(N_REVIEWS_CHOICES, weights=N_REVIEWS_W)[0]
+        span = max(1.0, -jo - 1)
+        if gu in talker_phrase:
+            body_txt, title_txt = talker_phrase[gu]
+            for _ in range(max(n, 8)):
+                pid = rng.choice(all_pids)
+                add_review(gu, pid, 5, title_txt,
+                           body_txt, jo + rng.uniform(1, span))
+            continue
+        chosen = rng.sample(all_pids, k=min(n, len(all_pids)))
+        for pid in chosen:
+            add_review(gu, pid, rating_roll(rng), rng.choice(G_TITLES),
+                       rng.choice(G_BODIES).format(p=short_name(pid)),
+                       jo + rng.uniform(1, span))
+        # ~8% write an update review for one of their products
+        if chosen and rng.random() < 0.08:
+            pid = rng.choice(chosen)
+            first_day = jo + rng.uniform(1, max(2.0, span - 15))
+            add_review(gu, pid, rating_roll(rng), "Update",
+                       rng.choice(UPDATE_BODIES).format(p=short_name(pid)),
+                       min(-0.5, first_day + rng.uniform(14, 30)))
+
+    # ---- T1 fan burst: one extra 5-star review each, inside a 3-day window
+    fan_start = -rng.uniform(8, 12)
+    for gu in fan_members:
+        add_review(gu, fan_pid, 5, "Finally!",
+                   rng.choice(FAN_BODIES).format(p=short_name(fan_pid)),
+                   fan_start + rng.uniform(0, 3))
+
+    # ---- T3 lookalikes: 6 NEW genuine users, same ~3-week join span,
+    #      all review the lookalike product (once) + normal activity
+    look_base = -rng.uniform(150, 320)
+    for _ in range(6):
+        jo = look_base - rng.uniform(0, 20)
+        users.append([uid, gen_username(rng, used_names), iso(anchor, days=jo),
+                      rng.choice(G_BIOS)])
+        look_members.append(uid)
+        join_of[uid] = jo
+        span = max(1.0, -jo - 1)
+        others = rng.sample([p for p in all_pids if p != look_pid], k=4)
+        add_review(uid, look_pid, rating_roll(rng), rng.choice(G_TITLES),
+                   rng.choice(G_BODIES).format(p=short_name(look_pid)),
+                   jo + rng.uniform(20, span))
+        for pid in others:
+            add_review(uid, pid, rating_roll(rng), rng.choice(G_TITLES),
+                       rng.choice(G_BODIES).format(p=short_name(pid)),
+                       jo + rng.uniform(1, span))
+        uid += 1
+
+    # ---- bot clusters (behavioral signature only; genuine-looking names)
+    bot_uids, bot_rids, cluster_info = [], [], []
+    for ci, target in enumerate(bot_targets):
+        bodies = BOT_BODY_SETS[ci % len(BOT_BODY_SETS)]
+        burst_off = rng.randint(6, 25)  # whole days: the burst must sit
+        # inside one calendar day (anchor is midnight; +0..8h of minutes)
+        join_base = -(burst_off + rng.uniform(2, 5))
+        c_uids = []
+        for _ in range(50):
+            users.append([uid, gen_username(rng, used_names),
                           iso(anchor, days=join_base - rng.uniform(0, 1.5)),
-                          c["bio"]))
+                          rng.choice(G_BIOS)])
             c_uids.append(uid)
-            bot_user_ids.append(uid)
-            # burst of reviews on the target product
-            burst_start = -c["burst_day_offset"]
-            for _ in range(rng.randint(*c["reviews_each"])):
-                reviews.append((rid, c["target"], uid, c["rating"],
-                                rng.choice(c["titles"]), rng.choice(c["bodies"]),
-                                iso(anchor, days=burst_start,
-                                    minutes=rng.uniform(0, c["burst_hours"] * 60))))
-                c_rids.append(rid)
-                bot_review_ids.append(rid)
+            bot_uids.append(uid)
+            for _ in range(rng.randint(3, 4)):
+                reviews.append([rid, target, uid, 5, rng.choice(BOT_TITLES),
+                                rng.choice(bodies),
+                                iso(anchor, days=-burst_off,
+                                    minutes=rng.uniform(0, 8 * 60))])
+                bot_rids.append(rid)
                 rid += 1
             uid += 1
-        cluster_info.append({"key": c["key"], "n_accounts": c["n"],
-                             "target_product": c["target"], "rating": c["rating"],
-                             "n_reviews": len(c_rids)})
+        cluster_info.append({"key": chr(ord("A") + ci), "n_accounts": 50,
+                             "target_product": target, "rating": 5,
+                             "burst_day_offset": round(burst_off, 2)})
 
-    # Shuffle the user list so bot accounts are interleaved among genuine
-    # ones — no contiguous ID block for a plan (or the dot) to lean on —
-    # then remap every ID consistently. Added 2026-10-21 for the held-out
-    # run. NOTE: the train run was generated with the pre-fix seeder; its
-    # labels/scorecards are archived and must not be regenerated.
+    # ---- shuffle IDs (bots interleaved), remap consistently
     temp_ids = [u[0] for u in users]
     shuffled = temp_ids[:]
     rng.shuffle(shuffled)
     final_id = {t: i + 1 for i, t in enumerate(shuffled)}
-    users = sorted(
-        [(final_id[u[0]], u[1], u[2], u[3]) for u in users],
-        key=lambda u: u[0],
-    )
-    reviews = [(r[0], r[1], final_id[r[2]], r[3], r[4], r[5], r[6])
-               for r in reviews]
-    bot_user_ids = [final_id[t] for t in bot_user_ids]
-
-    return users, reviews, bot_user_ids, bot_review_ids, cluster_info, anchor
+    users = sorted(([final_id[u[0]], u[1], u[2], u[3]] for u in users), key=lambda u: u[0])
+    reviews = [[r[0], r[1], final_id[r[2]], r[3], r[4], r[5], r[6]] for r in reviews]
+    bot_uids = sorted(final_id[t] for t in bot_uids)
+    traps = {k: sorted(final_id[t] for t in v) for k, v in traps.items()}
+    meta = {"bot_targets": bot_targets, "fan_product": fan_pid,
+            "lookalike_product": look_pid}
+    return users, reviews, bot_uids, sorted(bot_rids), cluster_info, traps, meta
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--invasion", required=True, choices=list(INVASIONS))
+    ap.add_argument("--variant", required=True, choices=["old", "new"])
     ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--db", required=True)
     ap.add_argument("--labels", required=True)
     a = ap.parse_args()
 
-    users, reviews, bot_uids, bot_rids, clusters, anchor = build(a.invasion, a.seed)
+    users, reviews, bot_uids, bot_rids, clusters, traps, meta = build(a.seed)
 
     if os.path.exists(a.db):
         os.remove(a.db)
     con = sqlite3.connect(a.db)
     con.executescript(SCHEMA)
     con.executemany("INSERT INTO products VALUES (?,?,?,?,?)", PRODUCTS)
-    con.executemany("INSERT INTO users VALUES (?,?,?,?)", users)
-    con.executemany("INSERT INTO reviews VALUES (?,?,?,?,?,?,?)", reviews)
+    con.executemany("INSERT INTO users VALUES (?,?,?,?)", [tuple(u) for u in users])
+    con.executemany("INSERT INTO reviews VALUES (?,?,?,?,?,?,?)", [tuple(r) for r in reviews])
     con.commit()
     n_users = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     n_reviews = con.execute("SELECT COUNT(*) FROM reviews").fetchone()[0]
     con.close()
 
     labels = {
-        "invasion": a.invasion,
+        "variant": a.variant,
         "seed": a.seed,
-        "anchor": INVASIONS[a.invasion]["anchor"],
+        "anchor": ANCHOR,
         "generated_at_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "bot_user_ids": sorted(bot_uids),
-        "bot_review_ids": sorted(bot_rids),
+        "bot_user_ids": bot_uids,
+        "bot_review_ids": bot_rids,
         "clusters": clusters,
+        "traps": traps,
+        "meta": meta,
         "counts": {
             "users_total": n_users,
             "users_bot": len(bot_uids),
@@ -341,8 +360,8 @@ def main():
     os.makedirs(os.path.dirname(a.labels) or ".", exist_ok=True)
     with open(a.labels, "w") as f:
         json.dump(labels, f, indent=1)
-
-    print(json.dumps({"db": a.db, "labels": a.labels, "counts": labels["counts"]}))
+    print(json.dumps({"db": a.db, "labels": a.labels, "counts": labels["counts"],
+                      "meta": meta, "clusters": clusters}))
 
 
 if __name__ == "__main__":
